@@ -1,0 +1,144 @@
+version: "3.9"
+
+services:
+  zookeeper:
+    build: ./zookeeper
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok"
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - clickstream
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - clickstream
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: clickdb
+    ports:
+      - "33060:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - clickstream
+
+  producer:
+    build: ./producer
+    container_name: kafka_producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: ["python", "producer.py"]
+    networks:
+      - clickstream
+
+  consumer:
+    build: ./consumer
+    container_name: kafka_consumer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - spark_data_volume:/app/data       # share data between batch and consumer
+    environment:
+      - CHECKPOINT_DIR=/app/data/checkpoints
+      - OUTPUT_PATH=/app/data/clean/
+    command: ["spark-submit", "--master", "local[*]", "streaming_consumer.py"]
+    networks:
+      - clickstream
+
+  batch:
+    build: ./batch
+    image: spark-batch:latest         # <--- give it a name for Airflow to use
+    container_name: batch_etl
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      - spark_batch_code:/app             # share batch code from volume
+      - spark_data_volume:/app/data       # share data between batch and consumer
+    environment:
+      - INPUT_PATH=/app/data/clean/
+      - OUTPUT_PATH=/app/data/aggregates/
+    command: ["spark-submit", "--master", "local[*]", "batch_etl.py"]
+    networks:
+      - clickstream
+
+  airflow:
+    build: ./airflow           # Build from your custom Dockerfile
+    container_name: airflow_scheduler
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: mysql+mysqldb://root:password@mysql_db:3306/airflow_db
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: "Asia/Kolkata"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 3600
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - /var/run/docker.sock:/var/run/docker.sock
+      - spark_batch_code:/batch           # Airflow can trigger jobs & access batch scripts
+      - spark_data_volume:/data           # optional if Airflow needs to inspect batch outputs
+    ports:
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - clickstream
+
+networks:
+  clickstream:
+    name: clickstream
+    driver: bridge
+
+volumes:
+  spark_batch_code:
+    name: spark_batch_code
+  spark_data_volume:
+    name: spark_data_volume
