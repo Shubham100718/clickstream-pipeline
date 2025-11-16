@@ -15,8 +15,8 @@ default_args = {
 with DAG(
     dag_id="batch_etl_dag",
     default_args=default_args,
-    description="Run Spark batch ETL every 5 minutes",
-    schedule_interval="*/5 * * * *",
+    description="Run Spark batch ETL daily at 1 AM",
+    schedule_interval="0 1 * * *",
     start_date=days_ago(0),   # ensures it starts from today
     catchup=False,
     is_paused_upon_creation=False,
