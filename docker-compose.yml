@@ -105,7 +105,7 @@ services:
       - clickstream
 
   airflow:
-    build: ./airflow           # Build from your custom Dockerfile
+    build: ./airflow
     container_name: airflow_scheduler
     restart: always
     depends_on:
@@ -121,7 +121,7 @@ services:
       - ./airflow/dags:/opt/airflow/dags
       - /var/run/docker.sock:/var/run/docker.sock
       - spark_batch_code:/batch           # Airflow can trigger jobs & access batch scripts
-      - spark_data_volume:/data           # optional if Airflow needs to inspect batch outputs
+      - spark_data_volume:/data
     ports:
       - "8081:8080"
     healthcheck:
